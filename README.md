@@ -86,7 +86,7 @@ This calculates an R<sup>2</sup> for the fits a provides a visualization as:
 
 
 ### Bayesian Nonparametric Motif shape learning
-An additional element of the model which is not explained how the shape of the motif is found.
+In the example above, the length of the motif if found using a Bayesian nonparamtric extension to the model described within the supplementary material of our manuscript.
 
 This is a necessary task because otherwise it is possible to learn a motif that is a frame-shifted version of a real motif.  In this case, if we do not adapt to the scenario, we will lose some of the signal.  We have solved this problem by considering the positions in the motifs that describe the distribution of bases with which it is aligned as additional latent variable.  We fit this during the motif update steps of the Gibbs sampler.  This is done by placing an truncated geometric prior on the length of motifs, and considering the posterior predictive probability of observing bases at the edge of motifs given the Dirichlet prior on motif parameters vs observing those same bases as part of the background distribution.
 
