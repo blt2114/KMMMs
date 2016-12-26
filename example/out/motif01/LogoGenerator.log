@@ -1,0 +1,3 @@
+yaxis [1.95774 (2); 0 (0)]
+gs: gs
+gs_opts: -q -r96 -dTextAlphaBits=4 -dSAFER -dBATCH -dNOPAUSE

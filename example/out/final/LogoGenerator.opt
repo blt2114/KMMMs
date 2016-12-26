@@ -1,0 +1,21 @@
+## /Users/briantrippe/Documents/Developer/KMMM
+
+LogoGenerator \
+	-file=example/out/motif02_final.psam \
+	-type=psam \
+	-style=bits_info \
+	-logo=temp_logo.eps \
+	-width=12 \
+	-height=7.5 \
+	-start_num=1 \
+	-outdir=example/out/final \
+	-format=eps
+
+# covert from example/out/final/temp_logo.eps [eps] to example/out/final/motif02_final.png [png]
+
+gs -sOutputFile=example/out/final/motif02_final.png \
+	-sDEVICE=png16m \
+	-dDEVICEWIDTHPOINTS=340 \
+	-dDEVICEHEIGHTPOINTS=213 \
+	-q -r96 -dTextAlphaBits=4 -dSAFER -dBATCH -dNOPAUSE \
+	example/out/final/temp_logo.eps
