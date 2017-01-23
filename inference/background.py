@@ -6,6 +6,8 @@ methods across different implementations of background models.
 from collections import defaultdict
 import numpy as np
 from inference import tools
+import theano
+from theano import tensor as T
 
 class Phi(object):
     """ Phi is the background model.  This implementation is an arbitrary
@@ -59,11 +61,20 @@ class Phi(object):
         # subsequences attributed to background
         self.kmer_counts = defaultdict(int)
         self.kmer_probs = {}
+        self.kmer_probs_array = np.zeros(5**8,dtype=np.float32)
         self.markov_probs = {}
         self.pseudo_count = prior_size
         self.mle = mle
         self.static = static
         self.K = k
+
+        Kmer = T.ivector("Kmer")
+        Kmer_idx_list, updates_seq_idx_1 = theano.scan(
+            lambda i, prev: prev*5 + i+1,
+            sequences =[Kmer],
+            outputs_info=T.zeros(1,dtype=np.int32))
+        Kmer_idx = Kmer_idx_list[-1]
+        self.Kmer_2_idx = theano.function([Kmer], Kmer_idx)
 
     def prob(self, seq):
         """ returns the probability of seeing seq as an arbitrary
@@ -205,5 +216,9 @@ class Phi(object):
         # use this to score every kmer. For lengths 1 to K
         for length in range(self.K):
             for kmer in tools.all_kmers(length+1):
-                self.kmer_probs[kmer] = self.score_kmer(kmer)
+                p_kmer = self.score_kmer(kmer)
+                self.kmer_probs[kmer] = p_kmer
+                kmer_idxs = np.array([tools.IDX[b] for b in kmer])
+                self.kmer_probs_array[self.Kmer_2_idx(kmer_idxs)]=p_kmer
         self.kmer_probs[""] = 1.0
+        self.kmer_probs_array[0] = 1.0

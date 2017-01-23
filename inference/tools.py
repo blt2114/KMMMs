@@ -27,6 +27,9 @@ PAIRS = {
     'G':'C'
     }
 
+def kmer_as_vec(kmer_seq):
+    return np.array([IDX[b] for b in kmer_seq], dtype=np.int32)
+
 def read_kmer_table(filename):
     """ read_kmer_table reads a kmer table into memory
 
