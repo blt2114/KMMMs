@@ -5,97 +5,8 @@ from collections import defaultdict, deque
 from multiprocessing import Pool
 import numpy as np
 from numpy import flipud, fliplr
-import time
 from scipy import special
 from inference import motif, tools
-import theano
-from theano import tensor as T
-from theano.ifelse import ifelse
-
-### build theano infrastructure
-print("Constructing theano computational graph")
-Motif = T.matrix('motif')
-Kmer = T.ivector('kmer')
-Offset = T.iscalar('offset')
-Is_rc = T.iscalar('is rev-comp')
-Motif_oriented = ifelse(T.lt(Is_rc, 1),Motif,Motif[::-1,::-1])
-# offset ranges for -(motif_len-1) to (K-1)
-# when d = -(motif_len-1), kmer_d = arange(0,1) and motif_d =
-# arange(motif_len-1,motif_len)
-# 
-# when d = (K-1), kmer_d = arange(K-1,K) and motif_d = arange(0,1)
-Kmer_d = Kmer[T.arange(
-    T.max([0,Offset]),
-    T.min([Motif.shape[0]+Offset,Kmer.shape[0]])
-    )]  
-Motif_d = Motif_oriented[
-    T.arange(
-        T.max([0,-Offset]),
-        T.min([Kmer.shape[0]-Offset,Motif.shape[0]])
-    )
-    ,:]
-Base_probs_d = Motif_d[T.arange(Motif_d.shape[0]), Kmer_d].prod()
-
-# set up theano infrastructure for handling background probabilities.
-P_kmers_bg = T.fvector('p_kmers_bg')
-Bg_seq_1 = Kmer[T.arange(0,T.max([0,Offset]))]
-Bg_seq_1_idx_list, updates_seq_idx_1 = theano.scan(
-    lambda i, prev: prev*5 + i+1,
-    sequences =[Bg_seq_1],
-    outputs_info=T.zeros(1,dtype=np.int32))
-Bg_seq_1_idx = Bg_seq_1_idx_list[-1]
-P_bg_1 = ifelse(T.lt(T.zeros_like(Offset),Offset),P_kmers_bg[Bg_seq_1_idx][0], T.ones_like(P_kmers_bg[0],dtype=np.float32))
-
-Bg_seq_2 = Kmer[T.arange(T.min([Motif.shape[0]+Offset,Kmer.shape[0]]),Kmer.shape[0])]
-Bg_seq_2_idx_list, updates_seq_idx_2 = theano.scan(
-    lambda i, prev: prev*5 + i+1,
-    sequences =[Bg_seq_2],
-    outputs_info=T.zeros(1,dtype=np.int32))
-Bg_seq_2_idx = Bg_seq_2_idx_list[-1]
-P_bg_2 = ifelse(
-        T.lt(Motif.shape[0]+Offset, Kmer.shape[0]),
-        P_kmers_bg[Bg_seq_2_idx][0],
-        T.ones_like(P_kmers_bg[0],dtype=np.float32)
-        )
-
-P_bg = P_bg_1*P_bg_2
-
-P_align = Base_probs_d*P_bg
-
-### Theano code for calculating counts of bases at offsets.
-Kmer_d_pad = Kmer[T.arange(
-    T.max([0,Offset-1]),
-    T.min([Motif.shape[0]+Offset+1,Kmer.shape[0]])
-    )]
-Kmer_d_pad_as_mat = Kmer_d_pad.repeat(4,0).reshape([Kmer_d_pad.shape[0],4])
-Count_indices_pad = T.arange(4).repeat(Kmer_d_pad.shape[0],0).reshape([4,Kmer_d_pad.shape[0]]).T
-Count_as_mat_pad =T.where(
-    T.eq(Count_indices_pad,Kmer_d_pad_as_mat),
-    T.ones_like(Kmer_d_pad_as_mat),
-    T.zeros_like(Kmer_d_pad_as_mat)
-)
-Zeros_d_pad_left = T.zeros([T.max([0,-Offset+1]),4])
-Zeros_d_pad_right = T.zeros([T.max([0,Motif.shape[0]-Kmer.shape[0]+Offset+1]),4])
-Padded_counts = T.concatenate([Zeros_d_pad_left,Count_as_mat_pad, Zeros_d_pad_right])
-Padded_counts_oriented = ifelse(
-        T.lt(Is_rc,1),
-        Padded_counts,
-        Padded_counts[::-1,::-1]
-        )
-
-# Establish the two functions that are needed
-print("compiling theano computational graph")
-p_align_eval = theano.function(
-    [Kmer, Motif,Offset, Is_rc, P_kmers_bg],
-    P_align,
-    name='eval p align'
-)
-padded_counts_eval = theano.function(
-    [Kmer,Offset, Is_rc, Motif],
-    Padded_counts_oriented,
-    name='eval_padded_counts'
-)
-print("finished compiling theano!")
 
 def motif_aligns_and_ps(kmer, m, m_idx, phi, kmmm):
     """motif_aligns_and_ps finds all possible aligments of the motif and the
@@ -127,7 +38,6 @@ def update_counts(alignments, alignment_motif_idxs, alignment_counts, kmer,
     for m_idx in motifs.keys():
         motifs_alignments[m_idx] = [(alignment, alignment_counts[i]) for i, alignment in
                 enumerate(alignments) if alignment_motif_idxs[i] == m_idx]
-
     component_counts = defaultdict(int)
     bg_seq_counts = defaultdict(int)
     eta = {}
@@ -183,46 +93,32 @@ def iteration_kmer(kmer, count, motifs, phi, kmmm):
         component_counts: dictionary mapping component idxs to the number of
             kmers assigned to them.
     """
+    alignments = []
+    alignment_motif_idxs = []
     align_ps = []
-    kmer_vec = tools.kmer_as_vec(kmer)
-    p_kmers_bg = phi.kmer_probs_array
-    motif_align_ranges = {}
     # get the probabilities for all alignments in the motif component.
-    if kmer != tools.rev_comp(kmer):
-        # we do not  need to do this for reverse palandromic
-        # seqeunces because their counts have not been collapsed
-        # with reverse complements.
-        palandrome_factor = 2.0
-    else:
-        palandrome_factor = 1.0
-    range_start = 0
     for m_idx, m in motifs.iteritems():
-        beta = np.array(m.beta)[1:-1] # don't include padding
-        all_ds = np.arange(-(beta.shape[0]-1),len(kmer))
-        all_is_rc = np.array([0]*len(all_ds)+[1]*len(all_ds), dtype=np.int32)
-        all_ds = np.concatenate([all_ds,all_ds])
-        p_offsets = np.array([p_align_eval(kmer_vec, beta, d, is_rc, p_kmers_bg) for
-                d, is_rc in zip(all_ds, all_is_rc)])
-        p_offsets /= len(p_offsets)
-        p_offsets *= kmmm.gamma[m_idx]*palandrome_factor
-        align_ps.extend(p_offsets)
-        motif_align_ranges[m_idx] = (range_start,range_start+len(p_offsets))
-        range_start += len(p_offsets)
+        align_ps_m, aligns_m = motif_aligns_and_ps(kmer, m, m_idx, phi, kmmm)
+        align_ps.extend(align_ps_m)
+        alignments.extend(aligns_m)
+        alignment_motif_idxs.extend([m_idx for _ in align_ps_m])
 
-    bg_prob = phi.prob(kmer)*kmmm.gamma[tools.BG_IDX]
+    if kmmm.variational:
+        bg_prob = phi.prob(kmer)*np.exp(special.digamma(kmmm.theta[tools.BG_IDX]))
+    else:
+        bg_prob = phi.prob(kmer)*kmmm.gamma[tools.BG_IDX]
 
     # Since we lump reverse complements.
-    # by the same logic as for the motif probs, this does not need
-    # to be doubled for reverse palandromic sequences.
-    bg_prob *= palandrome_factor
+    if kmer != tools.rev_comp(kmer):
+        # by the same logic as for the motif probs, this does not need
+        # to be doubled for reverse palandromic sequences.
+        bg_prob *= 2
     align_ps.append(bg_prob)
     p_kmer = sum(align_ps)
 
-    align_ps /= sum(align_ps) # normalize before sampling
+    align_ps /= sum(align_ps) # normalize before updating
 
     if kmmm.variational:
-        sys.stderr.write("variational not supported currently\n")
-        sys.exit(1)
         alignment_counts = count*align_ps
     else: # Draw the alignments
         alignment_counts = np.random.multinomial(count, align_ps)
@@ -233,22 +129,9 @@ def iteration_kmer(kmer, count, motifs, phi, kmmm):
         log_p_align_counts -= special.gammaln(count_align+1.0)
         log_p_align_counts += count_align * np.log(align_ps[i])
 
-    component_counts = defaultdict(int)
-    bg_seq_counts = defaultdict(int)
-    eta = {}
-    for m_idx, m in motifs.iteritems():
-        (begin, out) = motif_align_ranges[m_idx]
-        counts = alignment_counts[begin:out]
-        beta = np.array(m.beta)[1:-1] # don't include padding
-        all_ds = np.arange(-(beta.shape[0]-1),len(kmer))
-        all_is_rc = np.array([0]*len(all_ds)+[1]*len(all_ds), dtype=np.int32)
-        all_ds = np.concatenate([all_ds,all_ds])
-        motif_counts_kmer = np.sum([
-            count*padded_counts_eval(kmer_vec,d,is_rc,beta) for d, is_rc, count in zip(all_ds,all_is_rc,counts)
-            ], axis=0)
-        eta[m_idx] = motif_counts_kmer
-        component_counts[m_idx] = sum(counts)
-    bg_seq_counts[kmer] = alignment_counts[-1]
+    bg_seq_counts, eta, component_counts = update_counts(
+        alignments, alignment_motif_idxs, alignment_counts, kmer, motifs
+        )
     return p_kmer, eta, bg_seq_counts, component_counts, log_p_align_counts
 
 def iteration_chunk((kmers, kmer_counts, motifs, phi, kmmm)):
@@ -259,9 +142,7 @@ def iteration_chunk((kmers, kmer_counts, motifs, phi, kmmm)):
     component_counts = defaultdict(int)
     log_p_kmer_aligns = {}
     p_kmers = {}
-    sys.stderr.write("running")
-    for i, kmer in enumerate(kmers):
-        sys.stderr.write("\revaluating %6d/%6d"%(i,len(kmers)))
+    for kmer in kmers:
         p_kmer, eta_k, bg_seq_counts_k, component_counts_k, log_p_kmer_align = iteration_kmer(
             kmer, kmer_counts[kmer], motifs, phi, kmmm
             )
@@ -273,7 +154,6 @@ def iteration_chunk((kmers, kmer_counts, motifs, phi, kmmm)):
             component_counts[compnt] += count_c
         for seq, count in bg_seq_counts_k.iteritems():
             bg_seq_counts[seq] += count
-    sys.stderr.write("finished\n")
     return p_kmers, eta, bg_seq_counts, component_counts, log_p_kmer_aligns
 
 def iteration(phi, motifs, kmmm, stochastic=False, batch_size=None,
